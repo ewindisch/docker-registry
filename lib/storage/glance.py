@@ -107,7 +107,7 @@ class GlanceStorageLayers(Storage):
             token = self._get_auth_token()
         if not endpoint:
             endpoint = self._get_endpoint()
-        return glanceclient.Client('1', endpoint=endpoint, token=token)
+        return glanceclient.Client('2', endpoint=endpoint, token=token)
 
     def _init_path(self, path, create=True):
         """This resolve a standard Docker Registry path
@@ -124,24 +124,23 @@ class GlanceStorageLayers(Storage):
         if not image and create is True:
             if 'X-Meta-Glance-Image-Id' in flask.request.headers:
                 try:
-                    i = glance.images.get(
-                        flask.request.headers['X-Meta-Glance-Image-Id'])
                     if i.status == 'queued':
                         # We allow taking existing images only when queued
-                        image = i
-                        image.update(properties={'id': image_id},
-                                     purge_props=False)
+                        glance.images.update(image.id,
+                            docker_image_id=image_id)
                 except Exception:
                     pass
             if not image:
                 image = glance.images.create(
                     disk_format=self.disk_format,
                     container_format=self.container_format,
-                    properties={'id': image_id})
+                    docker_image_id=image_id)
             try:
-                image.update(is_public=True, purge_props=False)
+                glance.images.update(image.id, is_public=True)
             except Exception:
                 pass
+        if not filename:
+            raise Exception("No filename!")
         propname = 'meta_{0}'.format(filename)
         if filename == 'layer':
             propname = None
@@ -151,7 +150,7 @@ class GlanceStorageLayers(Storage):
         filters = {
             'disk_format': self.disk_format,
             'container_format': self.container_format,
-            'properties': {'id': image_id}
+            'docker_image_id': image_id
         }
         images = [i for i in glance.images.list(filters=filters)]
         if images:
@@ -160,7 +159,7 @@ class GlanceStorageLayers(Storage):
     def _clear_images_name(self, glance, image_name):
         images = glance.images.list(filters={'name': image_name})
         for image in images:
-            image.update(name=None, purge_props=False)
+            glance.images.update(image.id, name=None)
 
     def _handler_tag_created(self, sender, namespace, repository, tag, value):
         glance = self._create_glance_client()
@@ -173,7 +172,7 @@ class GlanceStorageLayers(Storage):
             image_name = '{0}/{1}'.format(namespace, image_name)
         # Clear any previous image tagged with this name
         self._clear_images_name(glance, image_name)
-        image.update(name=image_name, purge_props=False)
+        glance.images.update(image.id, name=image_name)
 
     def _handler_tag_deleted(self, sender, namespace, repository, tag):
         image_name = '{0}:{1}'.format(repository, tag)
@@ -186,16 +185,17 @@ class GlanceStorageLayers(Storage):
         (image, propname) = self._init_path(path, False)
         if not propname:
             raise ValueError('Wrong call (should be stream_read)')
-        if not image or propname not in image.properties:
+        if not image or propname not in image:
             raise IOError('No such image {0}'.format(path))
-        return image.properties[propname]
+        return getattr(image, propname)
 
     def put_content(self, path, content):
         (image, propname) = self._init_path(path)
         if not propname:
             raise ValueError('Wrong call (should be stream_write)')
         props = {propname: content}
-        image.update(properties=props, purge_props=False)
+        glance = self._create_glance_client()
+        glance.images.update(image.id, **props)
 
     def stream_read(self, path, bytes_range=None):
         (image, propname) = self._init_path(path, False)
@@ -209,7 +209,8 @@ class GlanceStorageLayers(Storage):
         (image, propname) = self._init_path(path)
         if propname:
             raise ValueError('Wrong call (should be put_content)')
-        image.update(data=fp, purge_props=False)
+        glance = self._create_glance_client()
+        glance.images.update(image.id, data=fp)
 
     def exists(self, path):
         (image, propname) = self._init_path(path, False)
@@ -217,7 +218,7 @@ class GlanceStorageLayers(Storage):
             return False
         if not propname:
             return True
-        return (propname in image.properties)
+        return (propname in image)
 
     def is_private(self, namespace, repository):
         return False
@@ -228,10 +229,9 @@ class GlanceStorageLayers(Storage):
             return
         if propname:
             # Delete only the image property
-            props = image.properties
-            if propname in props:
-                del props[propname]
-                image.update(properties=props)
+            if propname in image:
+                glance = self._create_glance_client()
+                glance.images.update(image.id, [propname])
             return
         image.delete()
 
